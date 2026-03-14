@@ -1,0 +1,55 @@
+name: Daily Checks (Auto-detect)
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # Runs daily at 2am UTC
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  detect-project-type:
+    name: Detect Project Type
+    runs-on: [self-hosted, hp, linux, x64]
+    outputs:
+      project-type: ${{ steps.detect.outputs.project-type }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Detect project type
+        id: detect
+        run: |
+          # Use the centralized detection script
+          ./.github/scripts/detect-project-type.sh --verbose --github-output --github-summary || true
+
+  trigger-nextjs-daily-checks:
+    name: Trigger Next.js Daily Checks
+    needs: detect-project-type
+    if: needs.detect-project-type.outputs.project-type == 'nextjs'
+    uses: ./.github/workflows/daily-checks-nextjs.yml
+
+  trigger-python-daily-checks:
+    name: Trigger Python Daily Checks
+    needs: detect-project-type
+    if: needs.detect-project-type.outputs.project-type == 'python'
+    uses: ./.github/workflows/daily-checks-python.yml
+
+  trigger-cpp-daily-checks:
+    name: Trigger C++ Daily Checks
+    needs: detect-project-type
+    if: needs.detect-project-type.outputs.project-type == 'cpp'
+    uses: ./.github/workflows/daily-checks-cpp.yml
+
+  no-daily-checks:
+    name: No Daily Checks Available
+    needs: detect-project-type
+    runs-on: [self-hosted, hp, linux, x64]
+    if: needs.detect-project-type.outputs.project-type == 'unknown'
+    steps:
+      - name: Report unknown project type
+        run: |
+          echo "## ⚠️ Unknown Project Type - Daily Checks Skipped" >> $GITHUB_STEP_SUMMARY
+          echo "Could not detect project type. Daily checks are available for:" >> $GITHUB_STEP_SUMMARY
+          echo "- package.json with 'next' (Next.js)" >> $GITHUB_STEP_SUMMARY
+          echo "- requirements.txt, setup.py, or pyproject.toml (Python)" >> $GITHUB_STEP_SUMMARY
+          echo "- CMakeLists.txt, Makefile, or *.cpp files (C++)" >> $GITHUB_STEP_SUMMARY
+          echo "✅ This is not an error - simply no daily checks to run for this project type"

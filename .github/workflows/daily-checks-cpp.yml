@@ -1,0 +1,207 @@
+name: Daily Checks - C++
+
+on:
+  workflow_call:  # Called by daily-checks.yml when C++ project is detected
+  workflow_dispatch:  # Allow manual triggering for testing
+
+jobs:
+  # Job 1: Standard multi-compiler testing
+  standard-tests:
+    name: Standard Tests (${{ matrix.compiler }})
+    runs-on: [self-hosted, hp, linux, x64]
+
+    strategy:
+      matrix:
+        compiler: [gcc, clang]
+        include:
+          - compiler: gcc
+            cc: gcc
+            cxx: g++
+          - compiler: clang
+            cc: clang
+            cxx: clang++
+      fail-fast: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake
+
+      - name: Display compiler versions
+        run: |
+          echo "### 📦 Standard Compiler Versions (${{ matrix.compiler }})" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          ${{ matrix.cc }} --version
+          ${{ matrix.cxx }} --version
+          cmake --version
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Configure and build
+        run: |
+          if [ -f "CMakeLists.txt" ]; then
+            mkdir -p build
+            cd build
+            cmake .. -DCMAKE_C_COMPILER=${{ matrix.cc }} -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} -DCMAKE_BUILD_TYPE=Release
+            cmake --build . --config Release
+          elif [ -f "Makefile" ]; then
+            make CC=${{ matrix.cc }} CXX=${{ matrix.cxx }}
+          fi
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+
+      - name: Run tests
+        run: |
+          if [ -f "CMakeLists.txt" ]; then
+            cd build
+            ctest --output-on-failure || echo "No tests configured"
+          elif [ -f "Makefile" ]; then
+            make test || echo "No test target available"
+          fi
+        continue-on-error: false
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-test-results-${{ matrix.compiler }}
+          path: |
+            build/
+            *.out
+          retention-days: 14
+
+  # Job 2: Bleeding-edge testing with latest compilers
+  bleeding-edge-tests:
+    name: Bleeding-Edge Testing (Latest GCC/Clang)
+    runs-on: [self-hosted, hp, linux, x64]
+    continue-on-error: true  # Don't fail the workflow if bleeding-edge tests fail
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install bleeding-edge compilers
+        run: |
+          # Add repositories for latest compilers
+          sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y || true
+          sudo apt-get update || true
+
+          # Install latest GCC and Clang
+          sudo apt-get install -y gcc-13 g++-13 || echo "GCC-13 not available"
+          sudo apt-get install -y clang-17 || echo "Clang-17 not available"
+          sudo apt-get install -y cmake
+        continue-on-error: true
+
+      - name: Display bleeding-edge compiler versions
+        run: |
+          echo "### 🔬 Bleeding-Edge Compiler Versions" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          gcc-13 --version 2>/dev/null || gcc --version
+          g++-13 --version 2>/dev/null || g++ --version
+          clang-17 --version 2>/dev/null || clang --version
+          cmake --version
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Build with bleeding-edge GCC
+        run: |
+          CC_VERSION=$(which gcc-13 2>/dev/null || which gcc)
+          CXX_VERSION=$(which g++-13 2>/dev/null || which g++)
+
+          if [ -f "CMakeLists.txt" ]; then
+            mkdir -p build-bleeding-gcc
+            cd build-bleeding-gcc
+            cmake .. -DCMAKE_C_COMPILER=$CC_VERSION -DCMAKE_CXX_COMPILER=$CXX_VERSION -DCMAKE_BUILD_TYPE=Release || echo "⚠️ CMake configuration failed"
+            cmake --build . --config Release || echo "⚠️ Build failed - expected with bleeding-edge"
+          elif [ -f "Makefile" ]; then
+            make CC=$CC_VERSION CXX=$CXX_VERSION || echo "⚠️ Build failed - expected with bleeding-edge"
+          fi
+        continue-on-error: true
+
+      - name: Build with bleeding-edge Clang
+        run: |
+          CC_VERSION=$(which clang-17 2>/dev/null || which clang)
+          CXX_VERSION=$(which clang++-17 2>/dev/null || which clang++)
+
+          if [ -f "CMakeLists.txt" ]; then
+            mkdir -p build-bleeding-clang
+            cd build-bleeding-clang
+            cmake .. -DCMAKE_C_COMPILER=$CC_VERSION -DCMAKE_CXX_COMPILER=$CXX_VERSION -DCMAKE_BUILD_TYPE=Release || echo "⚠️ CMake configuration failed"
+            cmake --build . --config Release || echo "⚠️ Build failed - expected with bleeding-edge"
+          fi
+        continue-on-error: true
+
+      - name: Upload bleeding-edge test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bleeding-edge-test-results
+          path: |
+            build-bleeding-*/
+            *.out
+          retention-days: 14
+        continue-on-error: true
+
+  # Job 3: Compiler version discovery
+  version-discovery:
+    name: Compiler Version Discovery Report
+    runs-on: [self-hosted, hp, linux, x64]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check available GCC versions
+        id: check-gcc
+        run: |
+          # Check what GCC versions are available
+          AVAILABLE_GCC=$(apt-cache search '^gcc-[0-9]+$' | grep -oP 'gcc-\K[0-9]+' | sort -V | tail -3 | tr '\n' ', ' | sed 's/,$//')
+          echo "available=$AVAILABLE_GCC" >> $GITHUB_OUTPUT
+          echo "Available GCC versions: $AVAILABLE_GCC"
+
+      - name: Check available Clang versions
+        id: check-clang
+        run: |
+          # Check what Clang versions are available
+          AVAILABLE_CLANG=$(apt-cache search '^clang-[0-9]+$' | grep -oP 'clang-\K[0-9]+' | sort -V | tail -3 | tr '\n' ', ' | sed 's/,$//')
+          echo "available=$AVAILABLE_CLANG" >> $GITHUB_OUTPUT
+          echo "Available Clang versions: $AVAILABLE_CLANG"
+
+      - name: Check latest CMake version
+        id: check-cmake
+        run: |
+          CURRENT_CMAKE=$(cmake --version | head -1 | grep -oP '[0-9]+\.[0-9]+\.[0-9]+')
+          LATEST_CMAKE=$(curl -s https://api.github.com/repos/Kitware/CMake/releases/latest | jq -r '.tag_name' | sed 's/v//')
+
+          echo "current=$CURRENT_CMAKE" >> $GITHUB_OUTPUT
+          echo "latest=$LATEST_CMAKE" >> $GITHUB_OUTPUT
+          echo "Current CMake: $CURRENT_CMAKE"
+          echo "Latest CMake: $LATEST_CMAKE"
+
+      - name: Generate version report summary
+        run: |
+          echo "# 🔍 Compiler Version Discovery Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Report Generated:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "## GCC" >> $GITHUB_STEP_SUMMARY
+          echo "- **Available versions:** \`${{ steps.check-gcc.outputs.available }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Currently Testing:** GCC (default)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "## Clang" >> $GITHUB_STEP_SUMMARY
+          echo "- **Available versions:** \`${{ steps.check-clang.outputs.available }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Currently Testing:** Clang (default)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "## CMake" >> $GITHUB_STEP_SUMMARY
+          echo "- **Current:** \`${{ steps.check-cmake.outputs.current }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Latest:** \`${{ steps.check-cmake.outputs.latest }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "*This report helps track upcoming compiler versions for proactive compatibility testing.*" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,287 @@
+name: Daily Checks - Next.js
+
+on:
+  workflow_call:  # Called by daily-checks.yml when Next.js project is detected
+  workflow_dispatch:  # Allow manual triggering for testing
+
+jobs:
+  # Job 1: Standard multi-version testing (same as CI)
+  standard-tests:
+    name: Standard Tests (Node.js ${{ matrix.node-version }})
+    runs-on: [self-hosted, hp, linux, x64]
+
+    strategy:
+      matrix:
+        node-version: ["20.x"]  # Test only LTS for daily checks (faster execution)
+      fail-fast: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-node-${{ matrix.node-version }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            npm-${{ runner.os }}-node-${{ matrix.node-version }}-
+            npm-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Display Node.js version
+        run: node --version
+
+      - name: Display installed package versions
+        run: |
+          echo "### 📦 Standard Package Versions (Node.js ${{ matrix.node-version }})" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          npm list --depth=0 | grep -E "(next|react|typescript|firebase)" >> $GITHUB_STEP_SUMMARY || echo "Dependencies installed" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Run ESLint
+        run: npm run lint
+        continue-on-error: false
+
+      - name: Type check
+        run: npx tsc --noEmit
+        continue-on-error: false
+
+      - name: Build Next.js application
+        run: npm run build
+        env:
+          NODE_ENV: production
+          NEXT_PUBLIC_FIREBASE_API_KEY: ${{ secrets.NEXT_PUBLIC_FIREBASE_API_KEY }}
+          NEXT_PUBLIC_FIREBASE_PROJECT_ID: ${{ secrets.NEXT_PUBLIC_FIREBASE_PROJECT_ID }}
+          NEXT_PUBLIC_API_BASE_URL: ${{ secrets.NEXT_PUBLIC_API_BASE_URL }}
+
+      # Optional: Run extended tests if available
+      # - name: Run extended test suite
+      #   run: npm run test:extended
+      #   continue-on-error: false
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-test-results-node-${{ matrix.node-version }}
+          path: |
+            .next/
+            coverage/
+          retention-days: 14
+
+  # Job 2: Bleeding-edge testing with pre-release packages
+  bleeding-edge-tests:
+    name: Bleeding-Edge Testing (Node.js 21.x + Pre-release Packages)
+    runs-on: [self-hosted, hp, linux, x64]
+    continue-on-error: true  # Don't fail the workflow if bleeding-edge tests fail
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 21.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: '21.x'
+        continue-on-error: true
+
+      - name: Install base dependencies
+        run: |
+          node --version
+          npm ci
+
+      - name: Install dependencies with pre-release versions
+        run: |
+          # Install fast-evolving packages with pre-release versions
+          # Use || true to continue even if pre-release not available
+          npm install next@canary react@rc react-dom@rc || true
+          npm install typescript@next @types/node@latest @types/react@latest @types/react-dom@latest || true
+          npm install --save-dev eslint@latest tailwindcss@latest || true
+          npm install firebase@latest firebase-admin@latest || true
+          
+      - name: Display installed bleeding-edge package versions
+        run: |
+          echo "### 🔬 Bleeding-Edge Package Versions (Node.js 21.x)" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "Node.js version:" >> $GITHUB_STEP_SUMMARY
+          node --version >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Package versions:" >> $GITHUB_STEP_SUMMARY
+          npm list --depth=0 | grep -E "(next|react|typescript|firebase|eslint|tailwindcss)" >> $GITHUB_STEP_SUMMARY || echo "Some packages not installed" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Run bleeding-edge lint
+        run: npm run lint || echo "⚠️ Bleeding-edge linting failed - expected"
+        continue-on-error: true
+
+      - name: Run bleeding-edge type check
+        run: npx tsc --noEmit || echo "⚠️ Bleeding-edge type check failed - expected"
+        continue-on-error: true
+
+      - name: Run bleeding-edge build
+        run: |
+          npm run build || echo "⚠️ Bleeding-edge build failed - expected"
+        env:
+          NODE_ENV: production
+          NEXT_PUBLIC_FIREBASE_API_KEY: ${{ secrets.NEXT_PUBLIC_FIREBASE_API_KEY }}
+          NEXT_PUBLIC_FIREBASE_PROJECT_ID: ${{ secrets.NEXT_PUBLIC_FIREBASE_PROJECT_ID }}
+          NEXT_PUBLIC_API_BASE_URL: ${{ secrets.NEXT_PUBLIC_API_BASE_URL }}
+        continue-on-error: true
+
+      - name: Upload bleeding-edge test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bleeding-edge-test-results
+          path: |
+            .next/
+            coverage/
+          retention-days: 14
+        continue-on-error: true
+
+  # Job 3: Automated version discovery
+  version-discovery:
+    name: Version Discovery Report
+    runs-on: [self-hosted, hp, linux, x64]
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check latest Node.js versions
+        id: check-nodejs
+        run: |
+          # Latest LTS version
+          LATEST_LTS=$(curl -s https://nodejs.org/dist/index.json | jq -r '[.[] | select(.lts != false)][0].version')
+          
+          # Latest stable version
+          LATEST_STABLE=$(curl -s https://nodejs.org/dist/index.json | jq -r '.[0].version')
+          
+          echo "latest-lts=$LATEST_LTS" >> $GITHUB_OUTPUT
+          echo "latest-stable=$LATEST_STABLE" >> $GITHUB_OUTPUT
+          echo "Latest LTS: $LATEST_LTS"
+          echo "Latest stable: $LATEST_STABLE"
+
+      - name: Check latest Next.js versions
+        id: check-nextjs
+        run: |
+          NEXTJS_JSON=$(npm view next --json)
+          NEXTJS_STABLE=$(echo "$NEXTJS_JSON" | jq -r '.version' || echo "unknown")
+          NEXTJS_CANARY=$(npm view next@canary version 2>/dev/null || echo "No canary")
+          
+          echo "stable=$NEXTJS_STABLE" >> $GITHUB_OUTPUT
+          echo "canary=$NEXTJS_CANARY" >> $GITHUB_OUTPUT
+          echo "Next.js stable: $NEXTJS_STABLE"
+          echo "Next.js canary: $NEXTJS_CANARY"
+
+      - name: Check latest React versions
+        id: check-react
+        run: |
+          REACT_JSON=$(npm view react --json)
+          REACT_STABLE=$(echo "$REACT_JSON" | jq -r '.version' || echo "unknown")
+          REACT_RC=$(npm view react@rc version 2>/dev/null || echo "No RC")
+          
+          echo "stable=$REACT_STABLE" >> $GITHUB_OUTPUT
+          echo "rc=$REACT_RC" >> $GITHUB_OUTPUT
+          echo "React stable: $REACT_STABLE"
+          echo "React RC: $REACT_RC"
+
+      - name: Check latest TypeScript versions
+        id: check-typescript
+        run: |
+          TS_JSON=$(npm view typescript --json)
+          TS_STABLE=$(echo "$TS_JSON" | jq -r '.version' || echo "unknown")
+          TS_NEXT=$(npm view typescript@next version 2>/dev/null || echo "No next")
+          
+          echo "stable=$TS_STABLE" >> $GITHUB_OUTPUT
+          echo "next=$TS_NEXT" >> $GITHUB_OUTPUT
+          echo "TypeScript stable: $TS_STABLE"
+          echo "TypeScript next: $TS_NEXT"
+
+      - name: Check latest Firebase versions
+        id: check-firebase
+        run: |
+          FIREBASE_JSON=$(npm view firebase --json)
+          FIREBASE_STABLE=$(echo "$FIREBASE_JSON" | jq -r '.version' || echo "unknown")
+          
+          ADMIN_JSON=$(npm view firebase-admin --json)
+          ADMIN_STABLE=$(echo "$ADMIN_JSON" | jq -r '.version' || echo "unknown")
+          
+          echo "stable=$FIREBASE_STABLE" >> $GITHUB_OUTPUT
+          echo "admin-stable=$ADMIN_STABLE" >> $GITHUB_OUTPUT
+          echo "Firebase stable: $FIREBASE_STABLE"
+          echo "Firebase Admin stable: $ADMIN_STABLE"
+
+      - name: Check latest Tailwind CSS versions
+        id: check-tailwind
+        run: |
+          TAILWIND_JSON=$(npm view tailwindcss --json)
+          TAILWIND_STABLE=$(echo "$TAILWIND_JSON" | jq -r '.version' || echo "unknown")
+          
+          echo "stable=$TAILWIND_STABLE" >> $GITHUB_OUTPUT
+          echo "Tailwind CSS stable: $TAILWIND_STABLE"
+
+      - name: Check latest ESLint versions
+        id: check-eslint
+        run: |
+          ESLINT_JSON=$(npm view eslint --json)
+          ESLINT_STABLE=$(echo "$ESLINT_JSON" | jq -r '.version' || echo "unknown")
+          
+          echo "stable=$ESLINT_STABLE" >> $GITHUB_OUTPUT
+          echo "ESLint stable: $ESLINT_STABLE"
+
+      - name: Generate version report summary
+        run: |
+          echo "# 🔍 Latest Version Discovery Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Report Generated:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "## Node.js" >> $GITHUB_STEP_SUMMARY
+          echo "- **Latest LTS:** \`${{ steps.check-nodejs.outputs.latest-lts }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Latest Stable:** \`${{ steps.check-nodejs.outputs.latest-stable }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Currently Testing:** 18.x, 20.x, 21.x" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "## Key Dependencies" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### Next.js" >> $GITHUB_STEP_SUMMARY
+          echo "- **Stable:** \`${{ steps.check-nextjs.outputs.stable }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Canary:** \`${{ steps.check-nextjs.outputs.canary }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### React" >> $GITHUB_STEP_SUMMARY
+          echo "- **Stable:** \`${{ steps.check-react.outputs.stable }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **RC:** \`${{ steps.check-react.outputs.rc }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### TypeScript" >> $GITHUB_STEP_SUMMARY
+          echo "- **Stable:** \`${{ steps.check-typescript.outputs.stable }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Next:** \`${{ steps.check-typescript.outputs.next }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### Firebase" >> $GITHUB_STEP_SUMMARY
+          echo "- **Client SDK:** \`${{ steps.check-firebase.outputs.stable }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Admin SDK:** \`${{ steps.check-firebase.outputs.admin-stable }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### Tailwind CSS" >> $GITHUB_STEP_SUMMARY
+          echo "- **Stable:** \`${{ steps.check-tailwind.outputs.stable }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### ESLint" >> $GITHUB_STEP_SUMMARY
+          echo "- **Stable:** \`${{ steps.check-eslint.outputs.stable }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "*This report helps track upcoming versions for proactive compatibility testing.*" >> $GITHUB_STEP_SUMMARY

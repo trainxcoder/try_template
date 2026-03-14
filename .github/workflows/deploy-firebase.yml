@@ -1,0 +1,49 @@
+name: Deploy to Firebase
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Deploy target'
+        required: false
+        default: 'hosting,functions'
+        type: choice
+        options:
+          - hosting,functions
+          - hosting
+          - functions
+
+jobs:
+  deploy:
+    name: Deploy to Production
+    runs-on: [self-hosted, hp, linux, x64]
+    environment: production
+    permissions:
+      contents: write
+      deployments: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+
+      - name: Install Firebase CLI
+        run: npm install -g firebase-tools@latest
+
+      - name: Build frontend
+        run: |
+          npm ci --prefix frontend
+          npm run build --prefix frontend
+        env:
+          NEXT_PUBLIC_FUNCTIONS_BASE_URL: ${{ secrets.NEXT_PUBLIC_FUNCTIONS_BASE_URL }}
+
+      - name: Deploy to Firebase
+        run: |
+          TARGET="${{ github.event.inputs.target || 'hosting,functions' }}"
+          firebase deploy --only "$TARGET" --project ${{ secrets.FIREBASE_PROJECT_ID }} --token ${{ secrets.FIREBASE_TOKEN }} --non-interactive

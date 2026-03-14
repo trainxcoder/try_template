@@ -1,0 +1,105 @@
+name: CI Tests - C++
+
+on:
+  workflow_call:  # Called by ci-test.yml when C++ project is detected
+
+jobs:
+  test:
+    name: Test (C++ ${{ matrix.compiler }})
+    runs-on: [self-hosted, hp, linux, x64]
+
+    strategy:
+      matrix:
+        compiler: [gcc, clang]
+        include:
+          - compiler: gcc
+            cc: gcc
+            cxx: g++
+          - compiler: clang
+            cc: clang
+            cxx: clang++
+      fail-fast: false  # Test all compilers even if one fails
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake
+
+      - name: Display compiler version
+        run: |
+          echo "## 🔧 Compiler Versions (${{ matrix.compiler }})" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          ${{ matrix.cc }} --version
+          ${{ matrix.cxx }} --version
+          cmake --version
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Configure CMake
+        if: hashFiles('CMakeLists.txt') != ''
+        run: |
+          mkdir -p build
+          cd build
+          cmake .. -DCMAKE_C_COMPILER=${{ matrix.cc }} -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} -DCMAKE_BUILD_TYPE=Release
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+
+      - name: Build with CMake
+        if: hashFiles('CMakeLists.txt') != ''
+        run: |
+          cd build
+          cmake --build . --config Release
+          echo "### ✅ CMake Build Successful" >> $GITHUB_STEP_SUMMARY
+
+      - name: Build with Make
+        if: hashFiles('CMakeLists.txt') == '' && hashFiles('Makefile') != ''
+        run: |
+          make CC=${{ matrix.cc }} CXX=${{ matrix.cxx }}
+          echo "### ✅ Make Build Successful" >> $GITHUB_STEP_SUMMARY
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+
+      - name: Run tests (CTest)
+        if: hashFiles('CMakeLists.txt') != ''
+        run: |
+          cd build
+          ctest --output-on-failure
+        continue-on-error: false
+
+      - name: Run tests (Make)
+        if: hashFiles('CMakeLists.txt') == '' && hashFiles('Makefile') != ''
+        run: |
+          make test || echo "No test target available"
+        continue-on-error: true
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts-${{ matrix.compiler }}
+          path: |
+            build/
+            *.out
+            *.exe
+          retention-days: 7
+
+  test-summary:
+    name: Test Summary
+    runs-on: [self-hosted, hp, linux, x64]
+    needs: test
+    if: always()
+    steps:
+      - name: Check test results
+        run: |
+          if [ "${{ needs.test.result }}" == "failure" ] || [ "${{ needs.test.result }}" == "cancelled" ]; then
+            echo "❌ Tests failed or were cancelled" >> $GITHUB_STEP_SUMMARY
+            echo "Tests failed or were cancelled"
+            exit 1
+          fi
+          echo "✅ All tests passed successfully across GCC and Clang" >> $GITHUB_STEP_SUMMARY
+          echo "All tests passed successfully"

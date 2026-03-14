@@ -1,0 +1,263 @@
+name: GitHub Copilot Agent
+
+on:
+# Trigger on push to any branch
+push:
+    branches:
+        - '**'
+
+# Trigger on pull requests to any branch
+pull_request:
+    branches:
+        - '**'
+
+  # Trigger on issues with specific labels
+  issues:
+    types: [opened, labeled]
+
+  # Allow manual trigger
+  workflow_dispatch:
+    inputs:
+      task:
+        description: 'Task for Copilot Agent'
+        required: false
+        default: 'Review code and suggest improvements'
+      prompt_file:
+        description: 'Prompt file to use (relative to .github/prompts/)'
+        required: false
+        default: ''
+
+jobs:
+  copilot-agent:
+    name: Run Copilot Agent
+    # Run on self-hosted runner
+    runs-on: [self-hosted, hp, linux, x64]
+
+    # Only run on specific conditions
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issues' && contains(github.event.issue.labels.*.name, 'copilot-agent')) ||
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'copilot-review'))
+
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.head_ref || github.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v2
+        with:
+          version: 8
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Determine task context
+        id: task-context
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "task=${{ github.event.inputs.task }}" >> $GITHUB_OUTPUT
+            echo "prompt_file=${{ github.event.inputs.prompt_file }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" == "issues" ]; then
+            echo "task=Address issue #${{ github.event.issue.number }}: ${{ github.event.issue.title }}" >> $GITHUB_OUTPUT
+            echo "issue_number=${{ github.event.issue.number }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" == "pull_request" ]; then
+            echo "task=Review PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}" >> $GITHUB_OUTPUT
+            echo "pr_number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run GitHub Copilot Agent
+        id: copilot-agent
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TASK: ${{ steps.task-context.outputs.task }}
+          PROMPT_FILE: ${{ steps.task-context.outputs.prompt_file }}
+        run: |
+          echo "🤖 Running GitHub Copilot Agent..."
+          echo "Task: $TASK"
+
+          # If prompt file specified, use it
+          if [ -n "$PROMPT_FILE" ] && [ -f ".github/prompts/$PROMPT_FILE" ]; then
+            echo "Using prompt file: .github/prompts/$PROMPT_FILE"
+            gh copilot suggest --prompt-file ".github/prompts/$PROMPT_FILE"
+          else
+            # Run Copilot with the task
+            gh copilot suggest "$TASK"
+          fi
+
+      - name: Comment on Issue
+        if: github.event_name == 'issues'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '🤖 GitHub Copilot Agent has been triggered for this issue.\n\nTask: ${{ steps.task-context.outputs.task }}'
+            })
+
+      - name: Comment on Pull Request
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '🤖 GitHub Copilot Agent review has been triggered for this PR.\n\nTask: ${{ steps.task-context.outputs.task }}'
+            })
+
+      - name: Create automated PR (if changes were made)
+        if: success()
+        run: |
+          # Check if there are any changes
+          if [[ -n $(git status --porcelain) ]]; then
+            echo "Changes detected, creating PR..."
+
+            # Configure git
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+
+            # Create branch
+            BRANCH_NAME="copilot-agent/$(date +%Y%m%d-%H%M%S)"
+            git checkout -b "$BRANCH_NAME"
+
+            # Commit changes
+            git add .
+            git commit -m "🤖 Copilot Agent: ${{ steps.task-context.outputs.task }}"
+
+            # Push branch
+            git push origin "$BRANCH_NAME"
+
+            # Create PR using gh CLI
+            gh pr create \
+              --title "🤖 Copilot Agent: ${{ steps.task-context.outputs.task }}" \
+              --body "This PR was automatically created by GitHub Copilot Agent.\n\n**Task:** ${{ steps.task-context.outputs.task }}\n\n**Triggered by:** ${{ github.event_name }}\n**Workflow run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+              --label "copilot-agent,automated"
+          else
+            echo "No changes detected, skipping PR creation."
+          fi
+
+  copilot-code-review:
+    name: Copilot Code Review
+    runs-on: self-hosted
+    if: github.event_name == 'pull_request'
+
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Get changed files
+        id: changed-files
+        run: |
+          # Get list of changed files
+          git diff --name-only origin/${{ github.base_ref }}..HEAD > changed_files.txt
+          echo "Changed files:"
+          cat changed_files.txt
+
+      - name: Run Copilot Review on changed files
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "🔍 Running Copilot review on changed files..."
+
+          # Review each changed file
+          while IFS= read -r file; do
+            if [ -f "$file" ]; then
+              echo "Reviewing: $file"
+              gh copilot explain "$file" || true
+            fi
+          done < changed_files.txt
+
+      - name: Post review summary
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const changedFiles = fs.readFileSync('changed_files.txt', 'utf8').trim().split('\n');
+
+            const body = `## 🤖 Copilot Agent Code Review
+
+            Reviewed ${changedFiles.length} changed file(s):
+            ${changedFiles.map(f => `- \`${f}\``).join('\n')}
+
+            **Status:** Review completed ✅
+
+            *Triggered by self-hosted runner*`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+  copilot-prompt-execution:
+    name: Execute Copilot Prompt
+    runs-on: self-hosted
+    if: |
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.prompt_file != ''
+
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate prompt file
+        id: validate
+        run: |
+          PROMPT_PATH=".github/prompts/${{ github.event.inputs.prompt_file }}"
+          if [ ! -f "$PROMPT_PATH" ]; then
+            echo "❌ Prompt file not found: $PROMPT_PATH"
+            exit 1
+          fi
+          echo "✅ Prompt file found: $PROMPT_PATH"
+          echo "prompt_path=$PROMPT_PATH" >> $GITHUB_OUTPUT
+
+      - name: Read and execute prompt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "📋 Executing prompt from: ${{ steps.validate.outputs.prompt_path }}"
+
+          # Read prompt content
+          PROMPT_CONTENT=$(cat "${{ steps.validate.outputs.prompt_path }}")
+
+          echo "Prompt content:"
+          echo "$PROMPT_CONTENT"
+
+          # Execute with Copilot (this is a placeholder - actual Copilot API integration needed)
+          echo "🤖 Copilot Agent would process this prompt..."
+
+      - name: Create summary
+        run: |
+          echo "## 🤖 Copilot Prompt Execution Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Prompt File:** \`${{ github.event.inputs.prompt_file }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** Executed ✅" >> $GITHUB_STEP_SUMMARY

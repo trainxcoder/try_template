@@ -1,0 +1,39 @@
+{
+  "project": {
+    "name": "Claude Skills",
+    "description": "AI automation system combining probabilistic decision-making with deterministic script execution",
+    "repo": "experiment-claude-skills",
+    "default_model": "claude-sonnet-4-6"
+  },
+  "prerequisites": [
+    "Python 3.10+",
+    "Node.js 18+ and npm",
+    "Claude Code CLI (https://docs.anthropic.com/en/docs/claude-code)"
+  ],
+  "mcp_servers": [
+  ],
+  "marketplace": [
+    {
+      "name": "anthropic/skills",
+      "url": "https://github.com/anthropic/skills",
+      "description": "Official Anthropic skills registry",
+      "requires_token": false
+    },
+    {
+      "name": "K-Dense-AI/claude-scientific-skills",
+      "url": "https://github.com/K-Dense-AI/claude-scientific-skills",
+      "description": "Scientific skills and agents for Claude",
+      "requires_token": false
+    },
+    {
+      "name": "VoltAgent/awesome-agent-skills",
+      "url": "https://github.com/VoltAgent/awesome-agent-skills",
+      "description": "Community-curated registry of 500+ agent skills",
+      "requires_token": false
+    }
+  ],
+  "skills": [
+  ],
+  "agents": [
+  ]
+}

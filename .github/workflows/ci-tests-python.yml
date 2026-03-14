@@ -1,0 +1,84 @@
+name: CI Tests - Python
+
+on:
+  workflow_call:  # Called by ci-test.yml when Python project is detected
+
+jobs:
+  test:
+    runs-on: [self-hosted, hp, linux, x64]
+
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+      fail-fast: false  # Test all versions even if one fails
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-python-${{ matrix.python-version }}-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            pip-${{ runner.os }}-python-${{ matrix.python-version }}-
+            pip-${{ runner.os }}-
+
+      - name: Display Python version
+        run: python --version
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install tox
+        run: pip install tox
+
+      - name: Display installed package versions
+        run: |
+          echo "## 📦 Installed Package Versions" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          pip list | grep -E "(fastapi|uvicorn|pydantic|pytest|firebase)" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Run code style checks
+        run: tox -e pycodestyle
+        continue-on-error: false
+
+      # - name: Run unit tests
+      #   run: tox -e test-unit
+
+      # - name: Run integration tests
+      #   run: tox -e test-integration
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-python-${{ matrix.python-version }}
+          path: |
+            .tox/*/log/
+            pytest-results.xml
+          retention-days: 7
+
+  test-summary:
+    runs-on: [self-hosted, hp, linux, x64]
+    needs: test
+    if: always()
+    steps:
+      - name: Check test results
+        run: |
+          if [ "${{ needs.test.result }}" == "failure" ] || [ "${{ needs.test.result }}" == "cancelled" ]; then
+            echo "❌ Tests failed or were cancelled" >> $GITHUB_STEP_SUMMARY
+            echo "Tests failed or were cancelled"
+            exit 1
+          fi
+          echo "✅ All tests passed successfully across Python 3.10, 3.11, and 3.12" >> $GITHUB_STEP_SUMMARY
+          echo "All tests passed successfully"

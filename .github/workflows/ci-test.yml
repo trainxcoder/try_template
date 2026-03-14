@@ -1,0 +1,56 @@
+name: CI Test (Auto-detect)
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  detect-project-type:
+    name: Detect Project Type
+    runs-on: [self-hosted, hp, linux, x64]
+    outputs:
+      project-type: ${{ steps.detect.outputs.project-type }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Detect project type
+        id: detect
+        run: |
+          # Use the centralized detection script
+          ./.github/scripts/detect-project-type.sh --verbose --github-output --github-summary || true
+
+  trigger-nextjs-tests:
+    name: Trigger Next.js Tests
+    needs: detect-project-type
+    if: needs.detect-project-type.outputs.project-type == 'nextjs'
+    uses: ./.github/workflows/ci-tests-nextjs.yml
+
+  trigger-python-tests:
+    name: Trigger Python Tests
+    needs: detect-project-type
+    if: needs.detect-project-type.outputs.project-type == 'python'
+    uses: ./.github/workflows/ci-tests-python.yml
+
+  trigger-cpp-tests:
+    name: Trigger C++ Tests
+    needs: detect-project-type
+    if: needs.detect-project-type.outputs.project-type == 'cpp'
+    uses: ./.github/workflows/ci-tests-cpp.yml
+
+  no-tests:
+    name: No Tests Available
+    needs: detect-project-type
+    runs-on: [self-hosted, hp, linux, x64]
+    if: needs.detect-project-type.outputs.project-type == 'unknown'
+    steps:
+      - name: Report unknown project type
+        run: |
+          echo "## ⚠️ Unknown Project Type" >> $GITHUB_STEP_SUMMARY
+          echo "Could not detect project type. Please ensure one of the following exists:" >> $GITHUB_STEP_SUMMARY
+          echo "- package.json with 'next' (Next.js)" >> $GITHUB_STEP_SUMMARY
+          echo "- requirements.txt, setup.py, or pyproject.toml (Python)" >> $GITHUB_STEP_SUMMARY
+          echo "- CMakeLists.txt, Makefile, or *.cpp files (C++)" >> $GITHUB_STEP_SUMMARY
+          exit 1

@@ -1,0 +1,272 @@
+name: Daily Checks - Python
+
+on:
+  workflow_call:  # Called by daily-checks.yml when Python project is detected
+  workflow_dispatch:  # Allow manual triggering for testing
+
+jobs:
+  # Job 1: Standard multi-version testing (same as CI)
+  standard-tests:
+    name: Standard Tests (Python ${{ matrix.python-version }})
+    runs-on: [self-hosted, hp, linux, x64]
+
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+      fail-fast: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-python-${{ matrix.python-version }}-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            pip-${{ runner.os }}-python-${{ matrix.python-version }}-
+            pip-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install tox
+
+      - name: Display Python version
+        run: python --version
+
+      - name: Display installed package versions
+        run: |
+          echo "### 📦 Standard Package Versions (Python ${{ matrix.python-version }})" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          pip list | grep -E "(fastapi|uvicorn|pydantic|pytest|firebase)" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Run code style checks
+        run: tox -e pycodestyle
+        continue-on-error: false
+
+      - name: Run API tests
+        run: tox -e api-test
+
+      - name: Run similarity tests
+        run: tox -e check-similarity
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-test-results-python-${{ matrix.python-version }}
+          path: |
+            .tox/*/log/
+            pytest-results.xml
+          retention-days: 14
+
+  # Job 2: Bleeding-edge testing with pre-release packages
+  bleeding-edge-tests:
+    name: Bleeding-Edge Testing (Python 3.13-dev)
+    runs-on: [self-hosted, hp, linux, x64]
+    continue-on-error: true  # Don't fail the workflow if bleeding-edge tests fail
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13-dev
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13-dev'  # Maintenance: Update to '3.14-dev' when Python 3.13 is released
+        continue-on-error: true
+
+      - name: Install base dependencies
+        run: |
+          python --version
+          python -m pip install --upgrade pip setuptools wheel
+
+      - name: Install dependencies with pre-release versions
+        run: |
+          # Install fast-evolving packages with pre-release versions
+          # These packages are identified from requirements.txt as having frequent breaking changes
+          # Maintenance: Update this list when adding/removing key dependencies in requirements.txt
+          pip install --pre --upgrade fastapi uvicorn pydantic firebase-functions firebase-admin google-cloud-storage || true
+          
+          # Install remaining dependencies from requirements.txt
+          pip install pytest tox python-dotenv pandas httpx sqlalchemy || true
+
+      - name: Display installed bleeding-edge package versions
+        run: |
+          echo "### 🔬 Bleeding-Edge Package Versions (Python 3.13-dev)" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "Python version:" >> $GITHUB_STEP_SUMMARY
+          python --version >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Package versions:" >> $GITHUB_STEP_SUMMARY
+          pip list | grep -E "(fastapi|uvicorn|pydantic|pytest|firebase)" >> $GITHUB_STEP_SUMMARY || echo "Some packages not installed" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Run bleeding-edge tests
+        run: |
+          pip install tox || true
+          tox -e api-test || echo "⚠️ Bleeding-edge tests failed - this is expected and non-blocking"
+          tox -e check-similarity || echo "⚠️ Bleeding-edge tests failed - this is expected and non-blocking"
+        continue-on-error: true
+
+      - name: Upload bleeding-edge test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bleeding-edge-test-results
+          path: |
+            .tox/*/log/
+            pytest-results.xml
+          retention-days: 14
+        continue-on-error: true
+
+  # Job 3: Automated version discovery
+  version-discovery:
+    name: Version Discovery Report
+    runs-on: [self-hosted, hp, linux, x64]
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check latest Python pre-release
+        id: check-python
+        run: |
+          # Fetch latest Python pre-release version from python.org
+          # Note: This scrapes HTML and may need updates if site structure changes
+          # Fallback message provided if pattern doesn't match
+          LATEST_PYTHON=$(curl -s https://www.python.org/downloads/ | grep -oP 'Python \K[0-9]+\.[0-9]+\.[0-9]+(a|b|rc)[0-9]+' | head -1 || echo "No pre-release found")
+          echo "latest-python=$LATEST_PYTHON" >> $GITHUB_OUTPUT
+          echo "Latest Python pre-release: $LATEST_PYTHON"
+
+      - name: Check latest LangChain versions
+        id: check-langchain
+        run: |
+          # Fetch package info once from PyPI API to reduce API calls
+          LANGCHAIN_JSON=$(curl -s https://pypi.org/pypi/langchain/json)
+          
+          # Extract stable and pre-release versions from the same JSON response
+          LANGCHAIN_STABLE=$(echo "$LANGCHAIN_JSON" | jq -r '.info.version' || echo "unknown")
+          LANGCHAIN_PRERELEASE=$(echo "$LANGCHAIN_JSON" | jq -r '.releases | keys[]' | grep -E '[0-9]+\.[0-9]+\.[0-9]+(a|b|rc)[0-9]+' | sort -V | tail -1 || echo "No pre-release")
+          
+          echo "stable=$LANGCHAIN_STABLE" >> $GITHUB_OUTPUT
+          echo "prerelease=$LANGCHAIN_PRERELEASE" >> $GITHUB_OUTPUT
+          echo "LangChain stable: $LANGCHAIN_STABLE"
+          echo "LangChain pre-release: $LANGCHAIN_PRERELEASE"
+
+      - name: Check latest LangChain-Core versions
+        id: check-langchain-core
+        run: |
+          CORE_JSON=$(curl -s https://pypi.org/pypi/langchain-core/json)
+          CORE_STABLE=$(echo "$CORE_JSON" | jq -r '.info.version' || echo "unknown")
+          CORE_PRERELEASE=$(echo "$CORE_JSON" | jq -r '.releases | keys[]' | grep -E '[0-9]+\.[0-9]+\.[0-9]+(a|b|rc)[0-9]+' | sort -V | tail -1 || echo "No pre-release")
+          
+          echo "stable=$CORE_STABLE" >> $GITHUB_OUTPUT
+          echo "prerelease=$CORE_PRERELEASE" >> $GITHUB_OUTPUT
+          echo "LangChain-Core stable: $CORE_STABLE"
+          echo "LangChain-Core pre-release: $CORE_PRERELEASE"
+
+      - name: Check latest LangChain-OpenAI versions
+        id: check-langchain-openai
+        run: |
+          OPENAI_JSON=$(curl -s https://pypi.org/pypi/langchain-openai/json)
+          OPENAI_STABLE=$(echo "$OPENAI_JSON" | jq -r '.info.version' || echo "unknown")
+          OPENAI_PRERELEASE=$(echo "$OPENAI_JSON" | jq -r '.releases | keys[]' | grep -E '[0-9]+\.[0-9]+\.[0-9]+(a|b|rc)[0-9]+' | sort -V | tail -1 || echo "No pre-release")
+          
+          echo "stable=$OPENAI_STABLE" >> $GITHUB_OUTPUT
+          echo "prerelease=$OPENAI_PRERELEASE" >> $GITHUB_OUTPUT
+          echo "LangChain-OpenAI stable: $OPENAI_STABLE"
+          echo "LangChain-OpenAI pre-release: $OPENAI_PRERELEASE"
+
+      - name: Check latest OpenAI versions
+        id: check-openai-sdk
+        run: |
+          SDK_JSON=$(curl -s https://pypi.org/pypi/openai/json)
+          SDK_STABLE=$(echo "$SDK_JSON" | jq -r '.info.version' || echo "unknown")
+          SDK_PRERELEASE=$(echo "$SDK_JSON" | jq -r '.releases | keys[]' | grep -E '[0-9]+\.[0-9]+\.[0-9]+(a|b|rc)[0-9]+' | sort -V | tail -1 || echo "No pre-release")
+          
+          echo "stable=$SDK_STABLE" >> $GITHUB_OUTPUT
+          echo "prerelease=$SDK_PRERELEASE" >> $GITHUB_OUTPUT
+          echo "OpenAI SDK stable: $SDK_STABLE"
+          echo "OpenAI SDK pre-release: $SDK_PRERELEASE"
+
+      - name: Check latest FastAPI versions
+        id: check-fastapi
+        run: |
+          FASTAPI_JSON=$(curl -s https://pypi.org/pypi/fastapi/json)
+          FASTAPI_STABLE=$(echo "$FASTAPI_JSON" | jq -r '.info.version' || echo "unknown")
+          FASTAPI_PRERELEASE=$(echo "$FASTAPI_JSON" | jq -r '.releases | keys[]' | grep -E '[0-9]+\.[0-9]+\.[0-9]+(a|b|rc)[0-9]+' | sort -V | tail -1 || echo "No pre-release")
+          
+          echo "stable=$FASTAPI_STABLE" >> $GITHUB_OUTPUT
+          echo "prerelease=$FASTAPI_PRERELEASE" >> $GITHUB_OUTPUT
+          echo "FastAPI stable: $FASTAPI_STABLE"
+          echo "FastAPI pre-release: $FASTAPI_PRERELEASE"
+
+      - name: Check latest LangGraph versions
+        id: check-langgraph
+        run: |
+          LANGGRAPH_JSON=$(curl -s https://pypi.org/pypi/langgraph/json)
+          LANGGRAPH_STABLE=$(echo "$LANGGRAPH_JSON" | jq -r '.info.version' || echo "unknown")
+          LANGGRAPH_PRERELEASE=$(echo "$LANGGRAPH_JSON" | jq -r '.releases | keys[]' | grep -E '[0-9]+\.[0-9]+\.[0-9]+(a|b|rc)[0-9]+' | sort -V | tail -1 || echo "No pre-release")
+          
+          echo "stable=$LANGGRAPH_STABLE" >> $GITHUB_OUTPUT
+          echo "prerelease=$LANGGRAPH_PRERELEASE" >> $GITHUB_OUTPUT
+          echo "LangGraph stable: $LANGGRAPH_STABLE"
+          echo "LangGraph pre-release: $LANGGRAPH_PRERELEASE"
+
+      - name: Generate version report summary
+        run: |
+          echo "# 🔍 Latest Version Discovery Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Report Generated:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "## Python" >> $GITHUB_STEP_SUMMARY
+          echo "- **Latest Pre-release:** \`${{ steps.check-python.outputs.latest-python }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Currently Testing:** Python 3.10, 3.11, 3.12" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "## Key Dependencies" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### LangChain" >> $GITHUB_STEP_SUMMARY
+          echo "- **Stable:** \`${{ steps.check-langchain.outputs.stable }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Pre-release:** \`${{ steps.check-langchain.outputs.prerelease }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### LangChain-Core" >> $GITHUB_STEP_SUMMARY
+          echo "- **Stable:** \`${{ steps.check-langchain-core.outputs.stable }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Pre-release:** \`${{ steps.check-langchain-core.outputs.prerelease }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### LangChain-OpenAI" >> $GITHUB_STEP_SUMMARY
+          echo "- **Stable:** \`${{ steps.check-langchain-openai.outputs.stable }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Pre-release:** \`${{ steps.check-langchain-openai.outputs.prerelease }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### OpenAI SDK" >> $GITHUB_STEP_SUMMARY
+          echo "- **Stable:** \`${{ steps.check-openai-sdk.outputs.stable }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Pre-release:** \`${{ steps.check-openai-sdk.outputs.prerelease }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### FastAPI" >> $GITHUB_STEP_SUMMARY
+          echo "- **Stable:** \`${{ steps.check-fastapi.outputs.stable }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Pre-release:** \`${{ steps.check-fastapi.outputs.prerelease }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### LangGraph" >> $GITHUB_STEP_SUMMARY
+          echo "- **Stable:** \`${{ steps.check-langgraph.outputs.stable }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Pre-release:** \`${{ steps.check-langgraph.outputs.prerelease }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "*This report helps track upcoming versions for proactive compatibility testing.*" >> $GITHUB_STEP_SUMMARY
